@@ -388,8 +388,40 @@ public:
                   transport == BT_TRANSPORT_CLASSIC ? "ESP_HID_TRANSPORT_BT (Classic)" : "ESP_HID_TRANSPORT_BLE (BLE)");
 
     esp_hidh_dev_t *dev = esp_hidh_dev_open(bda, (esp_hid_transport_t)transport, ble_addr_type);
+    
+    // Jika BLE dan gagal di percobaan pertama, coba tipe address alternatif (Public <-> Random)
+    if (dev == NULL && transport == BT_TRANSPORT_BLE) {
+      uint8_t altType = (ble_addr_type == BLE_ADDR_TYPE_PUBLIC) ? BLE_ADDR_TYPE_RANDOM : BLE_ADDR_TYPE_PUBLIC;
+      Serial.printf("[BT-BLE] Mencoba tipe alamat alternatif (%s)...\n", 
+                    altType == BLE_ADDR_TYPE_RANDOM ? "RANDOM" : "PUBLIC");
+      dev = esp_hidh_dev_open(bda, ESP_HID_TRANSPORT_BLE, altType);
+    }
+
+    // Jika Classic BT dan gagal (karena CONFIG_BT_HID_HOST_ENABLED dimatikan di core standar)
+    if (dev == NULL && transport == BT_TRANSPORT_CLASSIC) {
+      Serial.println("[BT] INFO PENTING: esp_hidh_dev_open mengembalikan NULL untuk Classic BT.");
+      Serial.println("[BT] Penyebab: Biner bawaan Arduino-ESP32 menonaktifkan CONFIG_BT_HID_HOST_ENABLED.");
+      Serial.println("[BT] Mencoba membuka koneksi otomatis via BLE (Bluetooth Low Energy)...");
+      dev = esp_hidh_dev_open(bda, ESP_HID_TRANSPORT_BLE, BLE_ADDR_TYPE_PUBLIC);
+      if (dev == NULL) {
+        dev = esp_hidh_dev_open(bda, ESP_HID_TRANSPORT_BLE, BLE_ADDR_TYPE_RANDOM);
+      }
+      if (dev != NULL) {
+        transport = BT_TRANSPORT_BLE;
+        connectedTransport = BT_TRANSPORT_BLE;
+        Serial.println("[BT] >> Berhasil membuka koneksi via Transport BLE! <<");
+      }
+    }
+
     if (dev == NULL) {
-      Serial.println("[BT] esp_hidh_dev_open mengembalikan NULL (mungkin sudah terhubung atau target sibuk).");
+      if (transport == BT_TRANSPORT_CLASSIC) {
+        Serial.println("\n[BT] SOLUSI UNTUK KEYBOARD BLUETOOTH CLASSIC:");
+        Serial.println("  1. Gunakan Keyboard BLE (Bluetooth Low Energy) yang didukung penuh bawaan core.");
+        Serial.println("  2. Atau instal Board Package 'esp32_bluepad32' di Arduino IDE untuk mengaktifkan");
+        Serial.println("     dukungan Bluetooth Classic HID Host.");
+      } else {
+        Serial.println("[BT] Gagal membuka koneksi BLE (perangkat di luar jangkauan atau sedang terhubung ke host lain).");
+      }
       return false;
     }
 

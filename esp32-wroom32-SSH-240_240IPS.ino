@@ -170,19 +170,26 @@ void printSerialHelpMenu() {
   Serial.println("\n========================================================");
   Serial.println("     MENU SERIAL UTAMA (BLUETOOTH DUAL-MODE & SSH)      ");
   Serial.println("========================================================");
+  Serial.println("--- PENGATURAN BLUETOOTH KEYBOARD ---");
   Serial.println("1. scan            : Pindai TERPADU (Classic BT + BLE sekaligus)");
   Serial.println("   scan classic    : Pindai khusus Bluetooth Classic (BR/EDR)");
   Serial.println("   scan ble        : Pindai khusus Bluetooth Low Energy (BLE)");
   Serial.println("2. select <no>     : Hubungkan ke perangkat hasil scan (Contoh: select 1)");
-  Serial.println("3. inject <MAC>    : Injeksi MAC Address manual (Contoh: inject 11:21:AC:00:03:58)");
+  Serial.println("3. inject <MAC>    : Injeksi MAC Address (Default: Classic)");
   Serial.println("   inject classic <MAC> / inject ble <MAC>");
+  Serial.println("\n--- PENGATURAN KONEKSI ---");
   Serial.println("4. wifi <ssid> <pw>: Atur SSID & Password WiFi via Serial");
   Serial.println("5. ssh <ip> <port> <user> <pass> : Atur target SSH Server");
   Serial.println("6. status          : Tampilkan status koneksi & NVS Flash");
+  Serial.println("\n--- SIMULASI NAVIGASI KEYBOARD VIA SERIAL ---");
+  Serial.println("• up / down        : Pindah pilihan menu di LCD ST7789");
+  Serial.println("• enter            : Pilih/masuk menu (atau simpan form)");
+  Serial.println("• esc              : Kembali ke Menu Utama");
+  Serial.println("• connect          : Langsung mulai koneksi sesi SSH ke Server");
+  Serial.println("• exit             : Tutup sesi SSH aktif (Simulasi Right-CTRL+C)");
+  Serial.println("\n--- SISTEM ---");
   Serial.println("7. reboot          : Restart ESP32");
-  Serial.println("8. help            : Tampilkan menu ini lagi");
-  Serial.println("--------------------------------------------------------");
-  Serial.println("Ketik nomor pilihan (1-8) atau teks perintah di atas:");
+  Serial.println("8. help            : Tampilkan menu bantuan ini");
   Serial.println("========================================================\n");
 }
 
@@ -247,6 +254,36 @@ void processSerialCommand(const String& cmd) {
       Serial.println("  inject classic 11:21:AC:00:03:58  (Classic BR/EDR)");
       Serial.println("  inject ble F4:73:35:12:34:56      (Bluetooth Low Energy)");
     }
+  }
+  else if (input.equalsIgnoreCase("up")) {
+    KeyEvent ev = {0, KEY_UP, false, false, false};
+    onKeyEvent(ev);
+  }
+  else if (input.equalsIgnoreCase("down")) {
+    KeyEvent ev = {0, KEY_DOWN, false, false, false};
+    onKeyEvent(ev);
+  }
+  else if (input.equalsIgnoreCase("enter")) {
+    KeyEvent ev = {'\r', KEY_ENTER, false, false, false};
+    onKeyEvent(ev);
+  }
+  else if (input.equalsIgnoreCase("esc")) {
+    KeyEvent ev = {27, KEY_ESC, false, false, false};
+    onKeyEvent(ev);
+  }
+  else if (input.equalsIgnoreCase("exit") || input.equalsIgnoreCase("exit ssh")) {
+    KeyEvent ev = {0, KEY_EXIT_SSH, true, false, false};
+    onKeyEvent(ev);
+  }
+  else if (input.equalsIgnoreCase("connect") || input.equalsIgnoreCase("ssh connect")) {
+    Serial.println("[SERIAL] Memulai sesi koneksi ke target SSH Server...");
+    UI.setState(STATE_SSH_TERMINAL);
+  }
+  else if (input.equalsIgnoreCase("menu")) {
+    if (UI.getState() == STATE_SSH_TERMINAL) {
+      SSHClient.closeSession();
+    }
+    UI.setState(STATE_MAIN_MENU);
   }
   else if (input.equalsIgnoreCase("3") || input.equalsIgnoreCase("status") || input.equalsIgnoreCase("6")) {
     Storage.printCurrentConfig();
