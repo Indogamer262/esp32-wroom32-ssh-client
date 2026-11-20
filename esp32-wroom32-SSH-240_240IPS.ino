@@ -67,8 +67,8 @@ void setup() {
   Serial.println("[INIT] Menginisialisasi Layar ST7789 240x240 IPS...");
   UI.begin();
 
-  // 3. Inisialisasi Bluetooth Keyboard Host (NimBLE)
-  Serial.println("[INIT] Menginisialisasi Bluetooth BLE Keyboard Host...");
+  // 3. Inisialisasi Bluetooth Keyboard Host (Classic + BLE)
+  Serial.println("[INIT] Menginisialisasi Bluetooth Dual-Mode (Classic + BLE) Keyboard Host...");
   BTKeyboard.begin();
   BTKeyboard.setEventHandler(onKeyEvent);
 
@@ -194,14 +194,20 @@ void processSerialCommand(const String& cmd) {
   Serial.printf("\n[SERIAL COMMAND]: %s\n", input.c_str());
 
   if (input.equalsIgnoreCase("scan classic")) {
+    BTKeyboard.clearScanResults();
     BTKeyboard.startClassicScan(6);
-    delay(6500);
+    while (BTKeyboard.getIsScanningClassic()) {
+      delay(100);
+    }
     BTKeyboard.printScanResults();
     Serial.println("[SERIAL] Untuk menghubungkan ke perangkat, ketik: select <nomor>");
   }
   else if (input.equalsIgnoreCase("scan ble")) {
+    BTKeyboard.clearScanResults();
     BTKeyboard.startBLEScan(6);
-    delay(6500);
+    while (BTKeyboard.getIsScanningBLE()) {
+      delay(100);
+    }
     BTKeyboard.printScanResults();
     Serial.println("[SERIAL] Untuk menghubungkan ke perangkat, ketik: select <nomor>");
   }

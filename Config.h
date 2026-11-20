@@ -36,7 +36,7 @@
 
 // Mode SPI Display ST7789:
 // Modul ST7789 tanpa pin CS umumnya membutuhkan SPI_MODE2 atau SPI_MODE3
-#define TFT_SPI_MODE    SPI_MODE2
+#define TFT_SPI_MODE    SPI_MODE3
 
 // Opsi Backlight:
 // Default disarankan ke GPIO 32 untuk kontrol PWM kecerahan layar.

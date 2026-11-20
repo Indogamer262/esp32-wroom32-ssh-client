@@ -4,6 +4,13 @@
 #include <Arduino.h>
 #include <vector>
 #include "nvs_flash.h"
+#include "esp32-hal-bt.h"
+#if __has_include("esp32-hal-alloc-bt-classic-mem.h")
+#include "esp32-hal-alloc-bt-classic-mem.h"
+#endif
+#if __has_include("esp32-hal-alloc-ble-mem.h")
+#include "esp32-hal-alloc-ble-mem.h"
+#endif
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
@@ -85,49 +92,99 @@ public:
     return connectedTransport;
   }
 
+  bool getIsScanningClassic() const {
+    return isScanningClassic;
+  }
+
+  bool getIsScanningBLE() const {
+    return isScanningBLE;
+  }
+
+  void clearScanResults() {
+    scanList.clear();
+  }
+
   void begin() {
     if (isInitialized) return;
 
     Serial.println("[BT] Menginisialisasi Native Bluetooth Dual-Mode (Classic + BLE)...");
 
-    // Inisialisasi Bluetooth Controller dalam mode DUAL (BTDM)
+    // 0. Pastikan NVS Flash aktif untuk penyimpanan konfigurasi & bonding Bluetooth
+    esp_err_t nvs_ret = nvs_flash_init();
+    if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      nvs_flash_erase();
+      nvs_flash_init();
+    }
+
+    // 1. Inisialisasi Bluetooth Controller dalam mode DUAL (BTDM)
     if (!btStarted()) {
-      esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-      esp_err_t ret = esp_bt_controller_init(&bt_cfg);
-      if (ret != ESP_OK) {
-        Serial.printf("[BT] Gagal init controller: 0x%x\n", ret);
-        return;
+      Serial.println("[BT] Memulai Bluetooth Controller (BTDM)...");
+      if (!btStartMode(BT_MODE_BTDM)) {
+        Serial.println("[BT] btStartMode(BT_MODE_BTDM) belum aktif, mencoba inisialisasi controller langsung...");
+
+        esp_bt_controller_status_t c_status = esp_bt_controller_get_status();
+        if (c_status == ESP_BT_CONTROLLER_STATUS_IDLE) {
+          esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+          esp_err_t ret = esp_bt_controller_init(&bt_cfg);
+          if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            Serial.printf("[BT] Gagal esp_bt_controller_init: 0x%x\n", ret);
+            return;
+          }
+        }
+
+        c_status = esp_bt_controller_get_status();
+        if (c_status == ESP_BT_CONTROLLER_STATUS_INITED) {
+          esp_err_t ret = esp_bt_controller_enable(ESP_BT_MODE_BTDM);
+          if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            Serial.printf("[BT] Gagal esp_bt_controller_enable BTDM: 0x%x\n", ret);
+            return;
+          }
+        }
       }
-      ret = esp_bt_controller_enable(ESP_BT_MODE_BTDM);
-      if (ret != ESP_OK) {
-        Serial.printf("[BT] Gagal enable BTDM: 0x%x\n", ret);
+    }
+
+    esp_bt_controller_status_t final_c_status = esp_bt_controller_get_status();
+    Serial.printf("[BT] Controller Status: %s (Kode: %d)\n", 
+                  final_c_status == ESP_BT_CONTROLLER_STATUS_ENABLED ? "ENABLED (OK)" : "TIDAK AKTIF",
+                  (int)final_c_status);
+
+    if (final_c_status != ESP_BT_CONTROLLER_STATUS_ENABLED) {
+      Serial.println("[BT] PERINGATAN: Bluetooth Controller gagal diaktifkan. Periksa Partition Scheme!");
+      return;
+    }
+
+    // 2. Inisialisasi Host Stack Bluedroid
+    esp_bluedroid_status_t b_status = esp_bluedroid_get_status();
+    if (b_status == ESP_BLUEDROID_STATUS_UNINITIALIZED) {
+      esp_err_t ret = esp_bluedroid_init();
+      if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        Serial.printf("[BT] Gagal init Bluedroid: 0x%x\n", ret);
         return;
       }
     }
 
-    // Inisialisasi Stack Bluedroid
-    esp_err_t ret = esp_bluedroid_init();
-    if (ret != ESP_OK) {
-      Serial.printf("[BT] Gagal init Bluedroid: 0x%x\n", ret);
-      return;
-    }
-    ret = esp_bluedroid_enable();
-    if (ret != ESP_OK) {
-      Serial.printf("[BT] Gagal enable Bluedroid: 0x%x\n", ret);
-      return;
+    b_status = esp_bluedroid_get_status();
+    if (b_status == ESP_BLUEDROID_STATUS_INITIALIZED) {
+      esp_err_t ret = esp_bluedroid_enable();
+      if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        Serial.printf("[BT] Gagal enable Bluedroid: 0x%x\n", ret);
+        return;
+      }
     }
 
-    // Register Callbacks untuk Classic BT GAP & BLE GAP
+    Serial.println("[BT] Bluedroid Host Stack: ENABLED (OK)");
+
+    // 3. Register Callbacks untuk Classic BT GAP & BLE GAP
     esp_bt_gap_register_callback(btGapCallbackStatic);
     esp_ble_gap_register_callback(bleGapCallbackStatic);
 
-    // Konfigurasi Security & Discovery Mode Classic BT
+    // 4. Konfigurasi Security & Discovery Mode Classic BT
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
     esp_bt_sp_param_t param_type = ESP_BT_SP_IOCAP_MODE;
-    esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_IO; // Bisa input/output PIN
+    esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_IO;
     esp_bt_gap_set_security_param(param_type, &iocap, sizeof(uint8_t));
 
-    // Konfigurasi Security BLE
+    // 5. Konfigurasi Security BLE
     esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_BOND;
 #if defined(ESP_IO_CAP_KBDISP)
     esp_ble_io_cap_t ble_iocap = ESP_IO_CAP_KBDISP;
@@ -145,26 +202,25 @@ public:
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(uint8_t));
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(uint8_t));
 
-    // Inisialisasi Unified HID Host (Mendukung Classic BT & BLE sekaligus)
+    // 6. Inisialisasi Unified HID Host
     esp_hidh_config_t hidh_cfg = {
       .callback = hidhCallbackStatic,
       .event_stack_size = 4096,
       .callback_arg = NULL
     };
-    ret = esp_hidh_init(&hidh_cfg);
+    esp_err_t ret = esp_hidh_init(&hidh_cfg);
     if (ret != ESP_OK) {
       Serial.printf("[BT] Gagal inisialisasi esp_hidh: 0x%x\n", ret);
       return;
     }
 
     isInitialized = true;
-    Serial.println("[BT] Stack Bluetooth Dual-Mode (Classic + BLE HID Host) SIAP!");
+    Serial.println("[BT] Stack Bluetooth Dual-Mode (Classic + BLE HID Host) BERHASIL AKTIF!");
   }
 
   // -------------------------------------------------------------
   // PEMINDAIAN (SCANNING)
   // -------------------------------------------------------------
-  // 1. Dual Scan: Memindai Bluetooth Classic lalu dilanjutkan BLE
   void startDualScan(int durationPerMode = 6) {
     scanList.clear();
     Serial.println("\n============================================================");
@@ -172,13 +228,11 @@ public:
     Serial.println("============================================================");
     Serial.println("[BT] Pastikan keyboard dalam Mode Pairing (lampu berkedip cepat)...");
 
-    // Fase 1: Scan Classic Bluetooth (BR/EDR)
     startClassicScan(durationPerMode);
     while (isScanningClassic) {
       delay(100);
     }
 
-    // Fase 2: Scan Bluetooth Low Energy (BLE)
     startBLEScan(durationPerMode);
     while (isScanningBLE) {
       delay(100);
@@ -187,19 +241,29 @@ public:
     printScanResults();
   }
 
-  // 2. Scan Khusus Bluetooth Classic
   void startClassicScan(int durationSeconds = 6) {
     if (!isInitialized) begin();
+    if (!isInitialized) {
+      Serial.println("[BT-Classic] Tidak dapat memindai: Bluetooth belum berhasil aktif.");
+      return;
+    }
     Serial.printf("[BT-Classic] Memindai perangkat Bluetooth Classic selama %d detik...\n", durationSeconds);
     isScanningClassic = true;
     uint8_t inq_len = (durationSeconds * 100) / 128;
     if (inq_len < 1) inq_len = 1;
-    esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, inq_len, 0);
+    esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, inq_len, 0);
+    if (err != ESP_OK) {
+      Serial.printf("[BT-Classic] Gagal memulai discovery: 0x%x\n", err);
+      isScanningClassic = false;
+    }
   }
 
-  // 3. Scan Khusus BLE
   void startBLEScan(int durationSeconds = 6) {
     if (!isInitialized) begin();
+    if (!isInitialized) {
+      Serial.println("[BT-BLE] Tidak dapat memindai: Bluetooth belum berhasil aktif.");
+      return;
+    }
     Serial.printf("[BT-BLE] Memindai perangkat Bluetooth Low Energy (BLE) selama %d detik...\n", durationSeconds);
     isScanningBLE = true;
     esp_ble_scan_params_t ble_scan_params = {
@@ -211,7 +275,11 @@ public:
       .scan_duplicate         = BLE_SCAN_DUPLICATE_ENABLE
     };
     esp_ble_gap_set_scan_params(&ble_scan_params);
-    esp_ble_gap_start_scanning(durationSeconds);
+    esp_err_t err = esp_ble_gap_start_scanning(durationSeconds);
+    if (err != ESP_OK) {
+      Serial.printf("[BT-BLE] Gagal memulai scanning: 0x%x\n", err);
+      isScanningBLE = false;
+    }
   }
 
   void printScanResults() {
@@ -222,7 +290,7 @@ public:
     for (size_t i = 0; i < scanList.size(); i++) {
       DiscoveredDevice& d = scanList[i];
       Serial.printf("[%2d] | %-9s | %-20s | %-18s | %d dBm\n", 
-                    i + 1,
+                    (int)(i + 1),
                     d.transport == BT_TRANSPORT_CLASSIC ? "[Classic]" : "[BLE]",
                     d.name.c_str(), 
                     d.address.c_str(), 
@@ -270,7 +338,6 @@ public:
     return ok;
   }
 
-  // Injeksi MAC Manual (Bisa Classic atau BLE)
   bool injectAndConnect(const String& macStr, uint8_t transport = BT_TRANSPORT_CLASSIC) {
     String cleanMac = macStr;
     cleanMac.trim();
@@ -331,9 +398,6 @@ public:
     isConnected = false;
   }
 
-  // -------------------------------------------------------------
-  // PARSING DATA REPORT KEYBOARD
-  // -------------------------------------------------------------
   void handleReport(const uint8_t* pData, size_t length) {
     if (length < 3 || pData == nullptr) return;
 
@@ -424,7 +488,6 @@ private:
     }
   }
 
-  // Classic BT GAP Callback
   static void btGapCallbackStatic(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
     switch (event) {
       case ESP_BT_GAP_DISC_RES_EVT: {
@@ -453,7 +516,6 @@ private:
           }
         }
 
-        // Cek duplikasi
         bool exists = false;
         for (auto& item : BTKeyboard.scanList) {
           if (item.address.equalsIgnoreCase(dev.address)) {
@@ -476,7 +538,6 @@ private:
         }
         break;
 
-      // Handling Pairing Classic BT (PIN / Passkey)
       case ESP_BT_GAP_KEY_NOTIF_EVT:
         Serial.println("\n============================================================");
         Serial.printf(">> PAIRING PASSKEY: KETIK [%06u] LALU TEKAN ENTER DI KEYBOARD <<\n", param->key_notif.passkey);
@@ -500,7 +561,6 @@ private:
     }
   }
 
-  // BLE GAP Callback
   static void bleGapCallbackStatic(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
     switch (event) {
       case ESP_GAP_BLE_SCAN_RESULT_EVT: {
