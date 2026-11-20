@@ -34,6 +34,10 @@
 #define TFT_DC_PIN       2
 #define TFT_CS_PIN      -1  // Modul tanpa pin CS (CS internal terhubung ke GND)
 
+// Mode SPI Display ST7789:
+// Modul ST7789 tanpa pin CS umumnya membutuhkan SPI_MODE2 atau SPI_MODE3
+#define TFT_SPI_MODE    SPI_MODE2
+
 // Opsi Backlight:
 // Default disarankan ke GPIO 32 untuk kontrol PWM kecerahan layar.
 // Jika ingin mencoba GPIO 36 (meski input only), ganti nilainya ke 36.

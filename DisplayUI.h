@@ -74,7 +74,7 @@ public:
     // Inisialisasi Display ST7789
     // Pin CS = -1 karena modul display tidak memiliki pin CS (hardwired ke GND)
     tft = new Adafruit_ST7789(TFT_CS_PIN, TFT_DC_PIN, TFT_RST_PIN);
-    tft->init(SCREEN_WIDTH, SCREEN_HEIGHT, SPI_MODE2);
+    tft->init(SCREEN_WIDTH, SCREEN_HEIGHT, TFT_SPI_MODE);
     tft->setRotation(2); // Sesuaikan orientasi (0, 1, 2, atau 3)
 
     // Setup Backlight PWM jika pin valid (bukan GPIO 36)

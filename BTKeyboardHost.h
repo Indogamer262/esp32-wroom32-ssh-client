@@ -129,7 +129,13 @@ public:
 
     // Konfigurasi Security BLE
     esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_BOND;
+#if defined(ESP_IO_CAP_KBDISP)
+    esp_ble_io_cap_t ble_iocap = ESP_IO_CAP_KBDISP;
+#elif defined(ESP_BLE_IO_CAP_KBDISP)
     esp_ble_io_cap_t ble_iocap = ESP_BLE_IO_CAP_KBDISP;
+#else
+    esp_ble_io_cap_t ble_iocap = ESP_IO_CAP_KBDISP;
+#endif
     uint8_t key_size = 16;
     uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
     uint8_t rsp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
