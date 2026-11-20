@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <vector>
 #include "nvs_flash.h"
+#include "esp_event.h"
 #include "esp32-hal-bt.h"
 #if __has_include("esp32-hal-alloc-bt-classic-mem.h")
 #include "esp32-hal-alloc-bt-classic-mem.h"
@@ -16,7 +17,19 @@
 #include "esp_bt_device.h"
 #include "esp_gap_bt_api.h"
 #include "esp_gap_ble_api.h"
+#include "esp_gattc_api.h"
 #include "esp_hidh.h"
+#if __has_include("esp_hidh_gattc.h")
+#include "esp_hidh_gattc.h"
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+void esp_hidh_gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
+#ifdef __cplusplus
+}
+#endif
 #include "Config.h"
 #include "StorageManager.h"
 
@@ -174,35 +187,25 @@ public:
 
     Serial.println("[BT] Bluedroid Host Stack: ENABLED (OK)");
 
-    // 3. Register Callbacks untuk Classic BT GAP & BLE GAP
+    // 3. Register Callbacks untuk Classic BT GAP, BLE GAP & BLE GATTC
+    Serial.println("[BT] Mendaftarkan Callbacks (GAP & GATT Client)...");
     esp_bt_gap_register_callback(btGapCallbackStatic);
     esp_ble_gap_register_callback(bleGapCallbackStatic);
+    esp_ble_gattc_register_callback(esp_hidh_gattc_event_handler);
 
-    // 4. Konfigurasi Security & Discovery Mode Classic BT
-    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+    // 4. Konfigurasi Security Sederhana (PIN/SSP Classic BT & BLE)
+    Serial.println("[BT] Mengonfigurasi Security Parameters...");
     esp_bt_sp_param_t param_type = ESP_BT_SP_IOCAP_MODE;
     esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_IO;
     esp_bt_gap_set_security_param(param_type, &iocap, sizeof(uint8_t));
 
-    // 5. Konfigurasi Security BLE
     esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_BOND;
-#if defined(ESP_IO_CAP_KBDISP)
     esp_ble_io_cap_t ble_iocap = ESP_IO_CAP_KBDISP;
-#elif defined(ESP_BLE_IO_CAP_KBDISP)
-    esp_ble_io_cap_t ble_iocap = ESP_BLE_IO_CAP_KBDISP;
-#else
-    esp_ble_io_cap_t ble_iocap = ESP_IO_CAP_KBDISP;
-#endif
-    uint8_t key_size = 16;
-    uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-    uint8_t rsp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
     esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
     esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &ble_iocap, sizeof(uint8_t));
-    esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(uint8_t));
-    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(uint8_t));
-    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(uint8_t));
 
-    // 6. Inisialisasi Unified HID Host
+    // 5. Inisialisasi Unified HID Host
+    Serial.println("[BT] Inisialisasi Unified HID Host (esp_hidh)...");
     esp_hidh_config_t hidh_cfg = {
       .callback = hidhCallbackStatic,
       .event_stack_size = 4096,
