@@ -30,6 +30,9 @@
  */
 
 #include <Arduino.h>
+#include <WiFi.h>
+#include <libssh_esp32.h>
+#include <libssh/libssh.h>
 #include "Config.h"
 #include "StorageManager.h"
 #include "BTKeyboardHost.h"

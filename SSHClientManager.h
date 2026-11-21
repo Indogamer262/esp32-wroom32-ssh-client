@@ -8,13 +8,9 @@
 #include "DisplayUI.h"
 
 // Library LibSSH-ESP32 (Tersedia di Library Manager Arduino IDE)
-#if __has_include("libssh_esp32.h")
-  #include "libssh_esp32.h"
-  #include <libssh/libssh.h>
-  #define HAS_LIBSSH 1
-#else
-  #define HAS_LIBSSH 0
-#endif
+#include <libssh_esp32.h>
+#include <libssh/libssh.h>
+#define HAS_LIBSSH 1
 
 class SSHClientManager {
 private:
