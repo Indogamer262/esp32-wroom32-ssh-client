@@ -6,16 +6,14 @@
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp32-hal-bt.h"
-#if __has_include("esp32-hal-alloc-bt-classic-mem.h")
-#include "esp32-hal-alloc-bt-classic-mem.h"
-#endif
+// HANYA alokasikan memori BLE (Classic BT dilepas untuk menghemat ~80 KB RAM)
 #if __has_include("esp32-hal-alloc-ble-mem.h")
 #include "esp32-hal-alloc-ble-mem.h"
 #endif
+
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
-#include "esp_gap_bt_api.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gattc_api.h"
 #include "esp_hidh.h"
@@ -60,8 +58,7 @@ struct DiscoveredDevice {
   String name;
   String address;
   esp_bd_addr_t bda;
-  uint8_t transport;      // 0 = Classic (ESP_HID_TRANSPORT_BT), 1 = BLE (ESP_HID_TRANSPORT_BLE)
-  uint8_t ble_addr_type;  // Public atau Random (khusus BLE)
+  uint8_t ble_addr_type;  // Public atau Random
   int rssi;
 };
 
@@ -74,14 +71,11 @@ private:
   bool isConnected = false;
   String connectedDeviceName = "";
   String connectedDeviceAddress = "";
-  uint8_t connectedTransport = BT_TRANSPORT_CLASSIC;
 
   std::vector<DiscoveredDevice> scanList;
   KeyEventHandler eventHandler = nullptr;
   uint8_t prevKeys[6] = {0, 0, 0, 0, 0, 0};
 
-  // State scanning
-  volatile bool isScanningClassic = false;
   volatile bool isScanningBLE = false;
 
 public:
@@ -101,15 +95,7 @@ public:
     return connectedDeviceAddress;
   }
 
-  uint8_t getConnectedTransport() const {
-    return connectedTransport;
-  }
-
-  bool getIsScanningClassic() const {
-    return isScanningClassic;
-  }
-
-  bool getIsScanningBLE() const {
+  bool getIsScanning() const {
     return isScanningBLE;
   }
 
@@ -120,92 +106,70 @@ public:
   void begin() {
     if (isInitialized) return;
 
-    Serial.println("[BT] Menginisialisasi Native Bluetooth Dual-Mode (Classic + BLE)...");
+    Serial.println("[BT] Menginisialisasi Bluetooth Low Energy (BLE Only) Keyboard Host...");
 
-    // 0. Pastikan NVS Flash aktif untuk penyimpanan konfigurasi & bonding Bluetooth
+    // 0. Pastikan NVS Flash aktif
     esp_err_t nvs_ret = nvs_flash_init();
     if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
       nvs_flash_erase();
       nvs_flash_init();
     }
 
-    // 1. Inisialisasi Bluetooth Controller dalam mode DUAL (BTDM)
-    if (!btStarted()) {
-      Serial.println("[BT] Memulai Bluetooth Controller (BTDM)...");
-      if (!btStartMode(BT_MODE_BTDM)) {
-        Serial.println("[BT] btStartMode(BT_MODE_BTDM) belum aktif, mencoba inisialisasi controller langsung...");
+    // 1. LEPAS MEMORI BLUETOOTH CLASSIC KE HEAP (Menghemat ~50 KB - 80 KB RAM penting!)
+    esp_err_t mem_rel = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+    if (mem_rel == ESP_OK) {
+      Serial.println("[BT] Memori Bluetooth Classic BERHASIL dilepas ke Heap (~50 KB RAM terbebas)!");
+    }
 
+    // 2. Inisialisasi Bluetooth Controller dalam mode BLE ONLY
+    if (!btStarted()) {
+      Serial.println("[BT] Memulai Bluetooth Controller (Mode: BLE Only)...");
+      if (!btStartMode(BT_MODE_BLE)) {
         esp_bt_controller_status_t c_status = esp_bt_controller_get_status();
         if (c_status == ESP_BT_CONTROLLER_STATUS_IDLE) {
           esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-          esp_err_t ret = esp_bt_controller_init(&bt_cfg);
-          if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-            Serial.printf("[BT] Gagal esp_bt_controller_init: 0x%x\n", ret);
-            return;
-          }
+          bt_cfg.mode = ESP_BT_MODE_BLE;
+          esp_bt_controller_init(&bt_cfg);
         }
-
-        c_status = esp_bt_controller_get_status();
-        if (c_status == ESP_BT_CONTROLLER_STATUS_INITED) {
-          esp_err_t ret = esp_bt_controller_enable(ESP_BT_MODE_BTDM);
-          if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-            Serial.printf("[BT] Gagal esp_bt_controller_enable BTDM: 0x%x\n", ret);
-            return;
-          }
-        }
+        esp_bt_controller_enable(ESP_BT_MODE_BLE);
       }
     }
 
     esp_bt_controller_status_t final_c_status = esp_bt_controller_get_status();
-    Serial.printf("[BT] Controller Status: %s (Kode: %d)\n", 
+    Serial.printf("[BT] Controller Status: %s (Mode: BLE Only, Kode: %d)\n", 
                   final_c_status == ESP_BT_CONTROLLER_STATUS_ENABLED ? "ENABLED (OK)" : "TIDAK AKTIF",
                   (int)final_c_status);
 
     if (final_c_status != ESP_BT_CONTROLLER_STATUS_ENABLED) {
-      Serial.println("[BT] PERINGATAN: Bluetooth Controller gagal diaktifkan. Periksa Partition Scheme!");
+      Serial.println("[BT] PERINGATAN: Bluetooth Controller gagal diaktifkan!");
       return;
     }
 
-    // 2. Inisialisasi Host Stack Bluedroid
+    // 3. Inisialisasi Host Stack Bluedroid
     esp_bluedroid_status_t b_status = esp_bluedroid_get_status();
     if (b_status == ESP_BLUEDROID_STATUS_UNINITIALIZED) {
-      esp_err_t ret = esp_bluedroid_init();
-      if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        Serial.printf("[BT] Gagal init Bluedroid: 0x%x\n", ret);
-        return;
-      }
+      esp_bluedroid_init();
     }
 
     b_status = esp_bluedroid_get_status();
     if (b_status == ESP_BLUEDROID_STATUS_INITIALIZED) {
-      esp_err_t ret = esp_bluedroid_enable();
-      if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        Serial.printf("[BT] Gagal enable Bluedroid: 0x%x\n", ret);
-        return;
-      }
+      esp_bluedroid_enable();
     }
 
-    Serial.println("[BT] Bluedroid Host Stack: ENABLED (OK)");
+    Serial.println("[BT] Bluedroid Host Stack (BLE): ENABLED (OK)");
 
-    // 3. Register Callbacks untuk Classic BT GAP, BLE GAP & BLE GATTC
-    Serial.println("[BT] Mendaftarkan Callbacks (GAP & GATT Client)...");
-    esp_bt_gap_register_callback(btGapCallbackStatic);
+    // 4. Register Callbacks BLE GAP & GATTC
+    Serial.println("[BT] Mendaftarkan Callbacks (BLE GAP & GATTC)...");
     esp_ble_gap_register_callback(bleGapCallbackStatic);
     esp_ble_gattc_register_callback(esp_hidh_gattc_event_handler);
 
-    // 4. Konfigurasi Security Sederhana (PIN/SSP Classic BT & BLE)
-    Serial.println("[BT] Mengonfigurasi Security Parameters...");
-    esp_bt_sp_param_t param_type = ESP_BT_SP_IOCAP_MODE;
-    esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_IO;
-    esp_bt_gap_set_security_param(param_type, &iocap, sizeof(uint8_t));
-
+    // 5. Konfigurasi Security BLE
     esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_BOND;
     esp_ble_io_cap_t ble_iocap = ESP_IO_CAP_KBDISP;
     esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
     esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &ble_iocap, sizeof(uint8_t));
 
-    // 5. Inisialisasi Unified HID Host
-    Serial.println("[BT] Inisialisasi Unified HID Host (esp_hidh)...");
+    // 6. Inisialisasi Unified HID Host (BLE)
     esp_hidh_config_t hidh_cfg = {
       .callback = hidhCallbackStatic,
       .event_stack_size = 4096,
@@ -218,57 +182,23 @@ public:
     }
 
     isInitialized = true;
-    Serial.println("[BT] Stack Bluetooth Dual-Mode (Classic + BLE HID Host) BERHASIL AKTIF!");
+    Serial.printf("[BT] Stack BLE Keyboard Host BERHASIL AKTIF! Free Heap: %u bytes\n", ESP.getFreeHeap());
   }
 
   // -------------------------------------------------------------
-  // PEMINDAIAN (SCANNING)
+  // PEMINDAIAN (SCANNING BLE)
   // -------------------------------------------------------------
-  void startDualScan(int durationPerMode = 6) {
-    scanList.clear();
-    Serial.println("\n============================================================");
-    Serial.println("  MEMULAI PEMINDAIAN TERPADU: BLUETOOTH CLASSIC + BLE SCAN  ");
-    Serial.println("============================================================");
-    Serial.println("[BT] Pastikan keyboard dalam Mode Pairing (lampu berkedip cepat)...");
-
-    startClassicScan(durationPerMode);
-    while (isScanningClassic) {
-      delay(100);
-    }
-
-    startBLEScan(durationPerMode);
-    while (isScanningBLE) {
-      delay(100);
-    }
-
-    printScanResults();
-  }
-
-  void startClassicScan(int durationSeconds = 6) {
-    if (!isInitialized) begin();
-    if (!isInitialized) {
-      Serial.println("[BT-Classic] Tidak dapat memindai: Bluetooth belum berhasil aktif.");
-      return;
-    }
-    Serial.printf("[BT-Classic] Memindai perangkat Bluetooth Classic selama %d detik...\n", durationSeconds);
-    isScanningClassic = true;
-    uint8_t inq_len = (durationSeconds * 100) / 128;
-    if (inq_len < 1) inq_len = 1;
-    esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, inq_len, 0);
-    if (err != ESP_OK) {
-      Serial.printf("[BT-Classic] Gagal memulai discovery: 0x%x\n", err);
-      isScanningClassic = false;
-    }
-  }
-
-  void startBLEScan(int durationSeconds = 6) {
+  void startScan(int durationSeconds = 6) {
     if (!isInitialized) begin();
     if (!isInitialized) {
       Serial.println("[BT-BLE] Tidak dapat memindai: Bluetooth belum berhasil aktif.");
       return;
     }
-    Serial.printf("[BT-BLE] Memindai perangkat Bluetooth Low Energy (BLE) selama %d detik...\n", durationSeconds);
+    scanList.clear();
+    Serial.printf("[BT-BLE] Memindai Keyboard Bluetooth Low Energy (BLE) selama %d detik...\n", durationSeconds);
+    Serial.println("[BT-BLE] Pastikan keyboard dalam Mode Pairing (lampu berkedip cepat)...");
     isScanningBLE = true;
+
     esp_ble_scan_params_t ble_scan_params = {
       .scan_type              = BLE_SCAN_TYPE_ACTIVE,
       .own_addr_type          = BLE_ADDR_TYPE_PUBLIC,
@@ -286,15 +216,14 @@ public:
   }
 
   void printScanResults() {
-    Serial.println("\n================ HASIL PEMINDAIAN BLUETOOTH ================");
-    Serial.printf("%-4s | %-9s | %-20s | %-18s | %-5s\n", "No", "Tipe", "Nama Perangkat", "MAC Address", "RSSI");
-    Serial.println("------------------------------------------------------------");
+    Serial.println("\n================ HASIL PEMINDAIAN BLE KEYBOARD ================");
+    Serial.printf("%-4s | %-24s | %-18s | %-5s\n", "No", "Nama Perangkat", "MAC Address", "RSSI");
+    Serial.println("---------------------------------------------------------------");
 
     for (size_t i = 0; i < scanList.size(); i++) {
       DiscoveredDevice& d = scanList[i];
-      Serial.printf("[%2d] | %-9s | %-20s | %-18s | %d dBm\n", 
+      Serial.printf("[%2d] | %-24s | %-18s | %d dBm\n", 
                     (int)(i + 1),
-                    d.transport == BT_TRANSPORT_CLASSIC ? "[Classic]" : "[BLE]",
                     d.name.c_str(), 
                     d.address.c_str(), 
                     d.rssi);
@@ -303,7 +232,7 @@ public:
     if (scanList.empty()) {
       Serial.println("[BT] Tidak ada perangkat ditemukan. Pastikan keyboard dalam mode pairing.");
     }
-    Serial.println("============================================================\n");
+    Serial.println("===============================================================\n");
   }
 
   int getScanCount() const {
@@ -318,7 +247,7 @@ public:
   }
 
   // -------------------------------------------------------------
-  // KONEKSI PERANGKAT
+  // KONEKSI PERANGKAT BLE
   // -------------------------------------------------------------
   bool connectByIndex(int index) {
     if (index < 1 || index > (int)scanList.size()) {
@@ -326,22 +255,20 @@ public:
       return false;
     }
     DiscoveredDevice dev = scanList[index - 1];
-    Serial.printf("[BT] Menghubungkan ke #%d: %s [%s] (%s)...\n", 
-                  index, dev.name.c_str(), dev.address.c_str(),
-                  dev.transport == BT_TRANSPORT_CLASSIC ? "Classic" : "BLE");
+    Serial.printf("[BT] Menghubungkan ke #%d: %s [%s] (BLE)...\n", 
+                  index, dev.name.c_str(), dev.address.c_str());
 
-    bool ok = connectRaw(dev.bda, dev.transport, dev.ble_addr_type);
+    bool ok = connectRaw(dev.bda, dev.ble_addr_type);
     if (ok) {
-      Storage.saveBT(dev.address, dev.transport);
+      Storage.saveBT(dev.address, BT_TRANSPORT_BLE);
       connectedDeviceName = dev.name;
       connectedDeviceAddress = dev.address;
-      connectedTransport = dev.transport;
-      Serial.println("[BT] MAC & Tipe Transport berhasil disimpan ke Flash internal.");
+      Serial.println("[BT] MAC BLE Keyboard berhasil disimpan ke Flash NVS.");
     }
     return ok;
   }
 
-  bool injectAndConnect(const String& macStr, uint8_t transport = BT_TRANSPORT_CLASSIC) {
+  bool injectAndConnect(const String& macStr) {
     String cleanMac = macStr;
     cleanMac.trim();
     if (cleanMac.length() != 17) {
@@ -355,15 +282,13 @@ public:
       return false;
     }
 
-    Serial.printf("[BT] Menginjeksi MAC: %s [Mode: %s]...\n", 
-                  cleanMac.c_str(), transport == BT_TRANSPORT_CLASSIC ? "Classic BT" : "BLE");
+    Serial.printf("[BT] Menginjeksi MAC BLE: %s...\n", cleanMac.c_str());
 
-    bool ok = connectRaw(bda, transport, 0);
+    bool ok = connectRaw(bda, BLE_ADDR_TYPE_PUBLIC);
     if (ok) {
-      Storage.saveBT(cleanMac, transport);
-      connectedDeviceName = "Bluetooth Keyboard";
+      Storage.saveBT(cleanMac, BT_TRANSPORT_BLE);
+      connectedDeviceName = "Bluetooth BLE Keyboard";
       connectedDeviceAddress = cleanMac;
-      connectedTransport = transport;
       Serial.println("[BT] MAC berhasil diinjeksi dan disimpan ke Flash!");
     }
     return ok;
@@ -371,57 +296,32 @@ public:
 
   void tryConnectSaved() {
     if (Storage.config.btKeyboardMac.length() == 17 && !isConnected) {
-      Serial.printf("[BT] Menghubungkan otomatis ke MAC tersimpan: %s [%s]...\n", 
-                    Storage.config.btKeyboardMac.c_str(),
-                    Storage.config.btTransportType == BT_TRANSPORT_CLASSIC ? "Classic BT" : "BLE");
+      Serial.printf("[BT] Menghubungkan otomatis ke MAC tersimpan: %s [BLE]...\n", 
+                    Storage.config.btKeyboardMac.c_str());
       esp_bd_addr_t bda;
       if (parseMAC(Storage.config.btKeyboardMac, bda)) {
-        connectRaw(bda, Storage.config.btTransportType, 0);
+        connectRaw(bda, BLE_ADDR_TYPE_PUBLIC);
       }
     }
   }
 
-  bool connectRaw(esp_bd_addr_t bda, uint8_t transport, uint8_t ble_addr_type) {
+  bool connectRaw(esp_bd_addr_t bda, uint8_t ble_addr_type) {
     if (!isInitialized) begin();
 
-    Serial.printf("[BT] Membuka koneksi HID Host (Transport: %s)...\n", 
-                  transport == BT_TRANSPORT_CLASSIC ? "ESP_HID_TRANSPORT_BT (Classic)" : "ESP_HID_TRANSPORT_BLE (BLE)");
+    Serial.println("[BT] Membuka koneksi BLE HID Host...");
 
-    esp_hidh_dev_t *dev = esp_hidh_dev_open(bda, (esp_hid_transport_t)transport, ble_addr_type);
+    esp_hidh_dev_t *dev = esp_hidh_dev_open(bda, ESP_HID_TRANSPORT_BLE, ble_addr_type);
     
-    // Jika BLE dan gagal di percobaan pertama, coba tipe address alternatif (Public <-> Random)
-    if (dev == NULL && transport == BT_TRANSPORT_BLE) {
+    // Jika gagal di percobaan pertama, coba tipe address alternatif (Public <-> Random)
+    if (dev == NULL) {
       uint8_t altType = (ble_addr_type == BLE_ADDR_TYPE_PUBLIC) ? BLE_ADDR_TYPE_RANDOM : BLE_ADDR_TYPE_PUBLIC;
       Serial.printf("[BT-BLE] Mencoba tipe alamat alternatif (%s)...\n", 
                     altType == BLE_ADDR_TYPE_RANDOM ? "RANDOM" : "PUBLIC");
       dev = esp_hidh_dev_open(bda, ESP_HID_TRANSPORT_BLE, altType);
     }
 
-    // Jika Classic BT dan gagal (karena CONFIG_BT_HID_HOST_ENABLED dimatikan di core standar)
-    if (dev == NULL && transport == BT_TRANSPORT_CLASSIC) {
-      Serial.println("[BT] INFO PENTING: esp_hidh_dev_open mengembalikan NULL untuk Classic BT.");
-      Serial.println("[BT] Penyebab: Biner bawaan Arduino-ESP32 menonaktifkan CONFIG_BT_HID_HOST_ENABLED.");
-      Serial.println("[BT] Mencoba membuka koneksi otomatis via BLE (Bluetooth Low Energy)...");
-      dev = esp_hidh_dev_open(bda, ESP_HID_TRANSPORT_BLE, BLE_ADDR_TYPE_PUBLIC);
-      if (dev == NULL) {
-        dev = esp_hidh_dev_open(bda, ESP_HID_TRANSPORT_BLE, BLE_ADDR_TYPE_RANDOM);
-      }
-      if (dev != NULL) {
-        transport = BT_TRANSPORT_BLE;
-        connectedTransport = BT_TRANSPORT_BLE;
-        Serial.println("[BT] >> Berhasil membuka koneksi via Transport BLE! <<");
-      }
-    }
-
     if (dev == NULL) {
-      if (transport == BT_TRANSPORT_CLASSIC) {
-        Serial.println("\n[BT] SOLUSI UNTUK KEYBOARD BLUETOOTH CLASSIC:");
-        Serial.println("  1. Gunakan Keyboard BLE (Bluetooth Low Energy) yang didukung penuh bawaan core.");
-        Serial.println("  2. Atau instal Board Package 'esp32_bluepad32' di Arduino IDE untuk mengaktifkan");
-        Serial.println("     dukungan Bluetooth Classic HID Host.");
-      } else {
-        Serial.println("[BT] Gagal membuka koneksi BLE (perangkat di luar jangkauan atau sedang terhubung ke host lain).");
-      }
+      Serial.println("[BT] esp_hidh_dev_open mengembalikan NULL (perangkat di luar jangkauan atau terhubung ke host lain).");
       return false;
     }
 
@@ -523,79 +423,6 @@ private:
     }
   }
 
-  static void btGapCallbackStatic(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
-    switch (event) {
-      case ESP_BT_GAP_DISC_RES_EVT: {
-        DiscoveredDevice dev;
-        char bdaStr[18];
-        snprintf(bdaStr, sizeof(bdaStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 param->disc_res.bda[0], param->disc_res.bda[1], param->disc_res.bda[2],
-                 param->disc_res.bda[3], param->disc_res.bda[4], param->disc_res.bda[5]);
-        dev.address = bdaStr;
-        memcpy(dev.bda, param->disc_res.bda, 6);
-        dev.transport = BT_TRANSPORT_CLASSIC;
-        dev.ble_addr_type = 0;
-        dev.rssi = -60;
-        dev.name = "(Bluetooth Device)";
-
-        for (int i = 0; i < param->disc_res.num_prop; i++) {
-          if (param->disc_res.prop[i].type == ESP_BT_GAP_DEV_PROP_BDNAME) {
-            char nameBuf[64];
-            int len = param->disc_res.prop[i].len;
-            if (len >= 64) len = 63;
-            memcpy(nameBuf, param->disc_res.prop[i].val, len);
-            nameBuf[len] = '\0';
-            dev.name = nameBuf;
-          } else if (param->disc_res.prop[i].type == ESP_BT_GAP_DEV_PROP_RSSI) {
-            dev.rssi = *(int8_t*)param->disc_res.prop[i].val;
-          }
-        }
-
-        bool exists = false;
-        for (auto& item : BTKeyboard.scanList) {
-          if (item.address.equalsIgnoreCase(dev.address)) {
-            exists = true;
-            if (dev.name != "(Bluetooth Device)") item.name = dev.name;
-            break;
-          }
-        }
-        if (!exists) {
-          BTKeyboard.scanList.push_back(dev);
-          Serial.printf("[Scan-Classic] Menemukan: %-20s | %s | %d dBm\n", dev.name.c_str(), dev.address.c_str(), dev.rssi);
-        }
-        break;
-      }
-
-      case ESP_BT_GAP_DISC_STATE_CHANGED_EVT:
-        if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
-          BTKeyboard.isScanningClassic = false;
-          Serial.println("[BT-Classic] Pemindaian Classic selesai.");
-        }
-        break;
-
-      case ESP_BT_GAP_KEY_NOTIF_EVT:
-        Serial.println("\n============================================================");
-        Serial.printf(">> PAIRING PASSKEY: KETIK [%06u] LALU TEKAN ENTER DI KEYBOARD <<\n", param->key_notif.passkey);
-        Serial.println("============================================================\n");
-        break;
-
-      case ESP_BT_GAP_PIN_REQ_EVT: {
-        esp_bt_pin_code_t pin_code;
-        pin_code[0] = '0'; pin_code[1] = '0'; pin_code[2] = '0'; pin_code[3] = '0';
-        esp_bt_gap_pin_reply(param->pin_req.bda, true, 4, pin_code);
-        Serial.println("[BT] Auto-reply PIN: 0000");
-        break;
-      }
-
-      case ESP_BT_GAP_CFM_REQ_EVT:
-        esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
-        break;
-
-      default:
-        break;
-    }
-  }
-
   static void bleGapCallbackStatic(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
     switch (event) {
       case ESP_GAP_BLE_SCAN_RESULT_EVT: {
@@ -608,7 +435,6 @@ private:
                    scan_result->scan_rst.bda[3], scan_result->scan_rst.bda[4], scan_result->scan_rst.bda[5]);
           dev.address = bdaStr;
           memcpy(dev.bda, scan_result->scan_rst.bda, 6);
-          dev.transport = BT_TRANSPORT_BLE;
           dev.ble_addr_type = scan_result->scan_rst.ble_addr_type;
           dev.rssi = scan_result->scan_rst.rssi;
           dev.name = "(BLE Device)";
@@ -641,6 +467,7 @@ private:
         } else if (scan_result->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_CMPL_EVT) {
           BTKeyboard.isScanningBLE = false;
           Serial.println("[BT-BLE] Pemindaian BLE selesai.");
+          BTKeyboard.printScanResults();
         }
         break;
       }

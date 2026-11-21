@@ -13,11 +13,13 @@
 // Library LibSSH-ESP32 (Tersedia di Library Manager Arduino IDE)
 #include <libssh_esp32.h>
 #include <libssh/libssh.h>
+
+#include <libssh/callbacks.h>
 #define HAS_LIBSSH 1
 
-// Stack size yang optimal untuk operasi kriptografi LibSSH pada ESP32 (12 KB / 10 KB)
-#define SSH_TASK_STACK_SIZE 10240
-#define SSH_TASK_STACK_FALLBACK 8192
+// Stack size yang aman untuk operasi kriptografi LibSSH pada ESP32 (20 KB / 16 KB)
+#define SSH_TASK_STACK_SIZE 20480
+#define SSH_TASK_STACK_FALLBACK 16384
 
 class SSHClientManager {
 private:
@@ -39,8 +41,16 @@ public:
     return isConnecting;
   }
 
+  static void libsshLoggingCallback(int priority, const char *function, const char *buffer, void *userdata) {
+    if (buffer != nullptr && strlen(buffer) > 0) {
+      Serial.printf("[libssh][%s] %s\n", function ? function : "core", buffer);
+    }
+  }
+
   void begin() {
     libssh_begin();
+    ssh_set_log_callback(libsshLoggingCallback);
+    ssh_set_log_level(SSH_LOG_PROTOCOL);
     if (txQueue == nullptr) {
       txQueue = xQueueCreate(256, sizeof(char));
     }
@@ -200,21 +210,32 @@ private:
       return;
     }
 
-    // 2. Konfigurasi Parameter LibSSH
-    // Matikan pembacaan file konfigurasi Unix (/etc/ssh/ssh_config) yang tidak ada di ESP32
-#ifdef SSH_OPTIONS_PROCESS_CONFIG
-    int process_config = 0;
-    ssh_options_set(session, SSH_OPTIONS_PROCESS_CONFIG, &process_config);
-#endif
+    // 2. Konfigurasi Parameter LibSSH Standar (Sesuai contoh resmi LibSSH-ESP32)
+    if (user.length() == 0) user = "pi";
 
     long timeout = 8;
-    int verbosity = SSH_LOG_PROTOCOL; // Aktifkan log protokol lengkap di Serial Monitor
+    int verbosity = SSH_LOG_PROTOCOL;
 
-    ssh_options_set(session, SSH_OPTIONS_HOST, host.c_str());
-    ssh_options_set(session, SSH_OPTIONS_PORT, &port);
-    ssh_options_set(session, SSH_OPTIONS_USER, user.c_str());
-    ssh_options_set(session, SSH_OPTIONS_TIMEOUT, &timeout);
-    ssh_options_set(session, SSH_OPTIONS_LOG_VERBOSITY, &verbosity);
+    int r;
+    r = ssh_options_set(session, SSH_OPTIONS_HOST, host.c_str());
+    Serial.printf("[SSH-OPT] Set HOST '%s' -> %s (%d)\n", host.c_str(), r == 0 ? "OK" : "FAIL", r);
+
+    r = ssh_options_set(session, SSH_OPTIONS_PORT, &port);
+    Serial.printf("[SSH-OPT] Set PORT %u -> %s (%d)\n", port, r == 0 ? "OK" : "FAIL", r);
+
+    r = ssh_options_set(session, SSH_OPTIONS_USER, user.c_str());
+    Serial.printf("[SSH-OPT] Set USER '%s' -> %s (%d)\n", user.c_str(), r == 0 ? "OK" : "FAIL", r);
+
+    r = ssh_options_set(session, SSH_OPTIONS_TIMEOUT, &timeout);
+    Serial.printf("[SSH-OPT] Set TIMEOUT %ld -> %s (%d)\n", timeout, r == 0 ? "OK" : "FAIL", r);
+
+    r = ssh_options_set(session, SSH_OPTIONS_LOG_VERBOSITY, &verbosity);
+    Serial.printf("[SSH-OPT] Set LOG_VERBOSITY -> %s (%d)\n", r == 0 ? "OK" : "FAIL", r);
+
+    // KUNCI: Tandai parsing konfigurasi telah selesai menggunakan file dummy SPIFFS kosong
+    // Ini secara otomatis mematikan pencarian file Unix /etc/ssh/ssh_config tanpa merusak opsi session!
+    r = ssh_options_parse_config(session, "/spiffs/known_hosts");
+    Serial.printf("[SSH-OPT] Parse Config Dummy (/spiffs/known_hosts) -> %s (%d)\n", r == 0 ? "OK" : "FAIL", r);
 
     // 3. Buka Koneksi SSH Handshake Langsung (KEX & Cipher Negotiation)
     Serial.println("[SSH] Menjalankan ssh_connect (Key Exchange & Cipher Negotiation)...");
@@ -336,12 +357,12 @@ private:
     }
 
     isConnected = false;
-    isConnecting = false;
-    shouldStop = false;
     Serial.println("[SSH] Sesi SSH ditutup dengan bersih.");
     UI.printTerminalString("\n[SSH] Sesi ditutup.\n", COLOR_MUTED);
     vTaskDelay(pdMS_TO_TICKS(1500));
     UI.setState(STATE_MAIN_MENU);
+    isConnecting = false;
+    shouldStop = false;
   }
 };
 

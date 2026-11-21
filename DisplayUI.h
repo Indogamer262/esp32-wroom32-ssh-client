@@ -435,9 +435,9 @@ private:
         case 1: setState(STATE_SSH_CONFIG); break;
         case 2: setState(STATE_SSH_TERMINAL); break;
         case 3:
-          // Pindai bluetooth keyboard (Dual Scan: Classic + BLE)
-          Serial.println("\n[UI] Memulai pemindaian Bluetooth Keyboard (Classic + BLE)...");
-          BTKeyboard.startDualScan(5);
+          // Pindai bluetooth keyboard (BLE Scan)
+          Serial.println("\n[UI] Memulai pemindaian BLE Keyboard...");
+          BTKeyboard.startScan(5);
           drawMainMenu();
           break;
       }

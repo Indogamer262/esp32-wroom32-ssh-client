@@ -31,6 +31,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <SPIFFS.h>
 #include <libssh_esp32.h>
 #include <libssh/libssh.h>
 #include "Config.h"
@@ -66,6 +67,25 @@ void setup() {
   Storage.begin();
   Storage.printCurrentConfig();
 
+  // 1b. Inisialisasi File System SPIFFS (Otomatis memformat jika partisi baru)
+  Serial.println("[INIT] Menginisialisasi File System SPIFFS...");
+  if (!SPIFFS.begin(true)) {
+    Serial.println("[SPIFFS] GAGAL me-mount atau memformat partisi SPIFFS!");
+  } else {
+    Serial.printf("[SPIFFS] Berhasil Aktif! Total: %u KB, Terpakai: %u KB\n",
+                  (unsigned int)(SPIFFS.totalBytes() / 1024), 
+                  (unsigned int)(SPIFFS.usedBytes() / 1024));
+
+    // Pastikan file known_hosts ada agar LibSSH dapat membaca/menulisnya tanpa error
+    if (!SPIFFS.exists("/known_hosts")) {
+      File f = SPIFFS.open("/known_hosts", FILE_WRITE);
+      if (f) {
+        f.close();
+        Serial.println("[SPIFFS] File /known_hosts berhasil dibuat.");
+      }
+    }
+  }
+
   // 2. Inisialisasi Layar LCD ST7789 IPS 240x240
   Serial.println("[INIT] Menginisialisasi Layar ST7789 240x240 IPS...");
   UI.begin();
@@ -100,13 +120,16 @@ void loop() {
     }
   }
 
-  // 2. Jika sedang berada dalam Sesi Terminal SSH
-  if (UI.getState() == STATE_SSH_TERMINAL) {
+  // 2. Transisi masuk ke Sesi Terminal SSH (Hanya dipicu sekali saat state berubah)
+  static UIState lastUIState = STATE_MAIN_MENU;
+  UIState currentUIState = UI.getState();
+
+  if (currentUIState == STATE_SSH_TERMINAL && lastUIState != STATE_SSH_TERMINAL) {
     if (!SSHClient.getIsConnected() && !SSHClient.getIsConnecting()) {
-      // Buka sesi SSH jika belum terkoneksi
       SSHClient.startSession();
     }
   }
+  lastUIState = currentUIState;
 
   delay(5);
 }
@@ -167,15 +190,12 @@ void onKeyEvent(const KeyEvent& ev) {
 // ============================================================================
 void printSerialHelpMenu() {
   Serial.println("\n========================================================");
-  Serial.println("     MENU SERIAL UTAMA (BLUETOOTH DUAL-MODE & SSH)      ");
+  Serial.println("   MENU SERIAL UTAMA (BLE KEYBOARD HOST & SSH CLIENT)   ");
   Serial.println("========================================================");
-  Serial.println("--- PENGATURAN BLUETOOTH KEYBOARD ---");
-  Serial.println("1. scan            : Pindai TERPADU (Classic BT + BLE sekaligus)");
-  Serial.println("   scan classic    : Pindai khusus Bluetooth Classic (BR/EDR)");
-  Serial.println("   scan ble        : Pindai khusus Bluetooth Low Energy (BLE)");
+  Serial.println("--- PENGATURAN BLUETOOTH BLE KEYBOARD ---");
+  Serial.println("1. scan            : Pindai Keyboard Bluetooth Low Energy (BLE)");
   Serial.println("2. select <no>     : Hubungkan ke perangkat hasil scan (Contoh: select 1)");
-  Serial.println("3. inject <MAC>    : Injeksi MAC Address (Default: Classic)");
-  Serial.println("   inject classic <MAC> / inject ble <MAC>");
+  Serial.println("3. inject <MAC>    : Injeksi MAC Address BLE (Contoh: inject FF:1D:FF:5A:7A:AB)");
   Serial.println("\n--- PENGATURAN KONEKSI ---");
   Serial.println("4. wifi <ssid> <pw>: Atur SSID & Password WiFi via Serial");
   Serial.println("5. ssh <ip> <port> <user> <pass> : Atur target SSH Server");
@@ -199,26 +219,10 @@ void processSerialCommand(const String& cmd) {
 
   Serial.printf("\n[SERIAL COMMAND]: %s\n", input.c_str());
 
-  if (input.equalsIgnoreCase("scan classic")) {
+  if (input.equalsIgnoreCase("1") || input.equalsIgnoreCase("scan") || 
+      input.equalsIgnoreCase("scan ble") || input.equalsIgnoreCase("scan classic")) {
     BTKeyboard.clearScanResults();
-    BTKeyboard.startClassicScan(6);
-    while (BTKeyboard.getIsScanningClassic()) {
-      delay(100);
-    }
-    BTKeyboard.printScanResults();
-    Serial.println("[SERIAL] Untuk menghubungkan ke perangkat, ketik: select <nomor>");
-  }
-  else if (input.equalsIgnoreCase("scan ble")) {
-    BTKeyboard.clearScanResults();
-    BTKeyboard.startBLEScan(6);
-    while (BTKeyboard.getIsScanningBLE()) {
-      delay(100);
-    }
-    BTKeyboard.printScanResults();
-    Serial.println("[SERIAL] Untuk menghubungkan ke perangkat, ketik: select <nomor>");
-  }
-  else if (input.equalsIgnoreCase("1") || input.equalsIgnoreCase("scan") || input.equalsIgnoreCase("scan dual")) {
-    BTKeyboard.startDualScan(5);
+    BTKeyboard.startScan(6);
     Serial.println("[SERIAL] Untuk menghubungkan ke perangkat, ketik: select <nomor>");
   }
   else if (input.startsWith("select ")) {
@@ -227,31 +231,19 @@ void processSerialCommand(const String& cmd) {
     UI.drawMainMenu();
   }
   else if (input.startsWith("inject")) {
-    // Format: inject [classic|ble] XX:XX:XX:XX:XX:XX
-    String args = input.substring(6);
-    args.trim();
-
-    uint8_t transport = BT_TRANSPORT_CLASSIC; // Default ke Classic untuk keyboard pengguna
-    String mac = args;
-
-    if (args.startsWith("classic ") || args.startsWith("Classic ")) {
-      transport = BT_TRANSPORT_CLASSIC;
-      mac = args.substring(8);
-      mac.trim();
-    } else if (args.startsWith("ble ") || args.startsWith("BLE ")) {
-      transport = BT_TRANSPORT_BLE;
-      mac = args.substring(4);
+    // Format: inject XX:XX:XX:XX:XX:XX
+    String mac = input.substring(6);
+    mac.trim();
+    if (mac.startsWith("ble ") || mac.startsWith("classic ")) {
+      mac = mac.substring(mac.indexOf(' ') + 1);
       mac.trim();
     }
 
     if (mac.length() == 17) {
-      BTKeyboard.injectAndConnect(mac, transport);
+      BTKeyboard.injectAndConnect(mac);
       UI.drawMainMenu();
     } else {
-      Serial.println("[SERIAL] Format salah! Contoh:");
-      Serial.println("  inject 11:21:AC:00:03:58          (Default: Classic BT)");
-      Serial.println("  inject classic 11:21:AC:00:03:58  (Classic BR/EDR)");
-      Serial.println("  inject ble F4:73:35:12:34:56      (Bluetooth Low Energy)");
+      Serial.println("[SERIAL] Format salah! Contoh: inject FF:1D:FF:5A:7A:AB");
     }
   }
   else if (input.equalsIgnoreCase("up")) {
@@ -289,11 +281,11 @@ void processSerialCommand(const String& cmd) {
     Serial.printf("WiFi Status    : %s (IP: %s)\n", 
                   WiFi.status() == WL_CONNECTED ? "TERKONEKSI" : "TERPUTUS",
                   WiFi.localIP().toString().c_str());
-    Serial.printf("BT Keyboard    : %s (%s) [Mode: %s]\n", 
+    Serial.printf("BT Keyboard    : %s (%s) [Mode: BLE]\n", 
                   BTKeyboard.getIsConnected() ? "TERHUBUNG" : "TERPUTUS",
-                  BTKeyboard.getConnectedAddress().c_str(),
-                  BTKeyboard.getConnectedTransport() == BT_TRANSPORT_CLASSIC ? "Classic BR/EDR" : "BLE");
+                  BTKeyboard.getConnectedAddress().c_str());
     Serial.printf("Free Heap RAM  : %u bytes\n", ESP.getFreeHeap());
+    Serial.printf("Blok Terbesar  : %u bytes\n", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     Serial.printf("Min Free Heap  : %u bytes\n", ESP.getMinFreeHeap());
   }
   else if (input.startsWith("wifi ")) {

@@ -42,7 +42,7 @@ public:
     config.sshUser  = prefs.getString("ssh_user", DEFAULT_SSH_USER);
     config.sshPass  = prefs.getString("ssh_pass", "");
     config.btKeyboardMac = prefs.getString("bt_mac", "");
-    config.btTransportType = prefs.getUChar("bt_type", BT_TRANSPORT_CLASSIC);
+    config.btTransportType = prefs.getUChar("bt_type", BT_TRANSPORT_BLE);
     config.screenBrightness = prefs.getUChar("brightness", 255);
   }
 
@@ -83,9 +83,8 @@ public:
     Serial.printf("SSH Target    : %s:%d\n", config.sshHost.c_str(), config.sshPort);
     Serial.printf("SSH User      : %s\n", config.sshUser.c_str());
     Serial.printf("SSH Password  : %s\n", config.sshPass.length() > 0 ? "********" : "(Kosong)");
-    Serial.printf("BT Keyboard   : %s [Mode: %s]\n", 
-                  config.btKeyboardMac.length() > 0 ? config.btKeyboardMac.c_str() : "(Belum dipasangkan)",
-                  config.btTransportType == BT_TRANSPORT_CLASSIC ? "Classic BR/EDR" : "BLE");
+    Serial.printf("BT Keyboard   : %s [Mode: BLE]\n", 
+                  config.btKeyboardMac.length() > 0 ? config.btKeyboardMac.c_str() : "(Belum dipasangkan)");
     Serial.printf("Kecerahan LCD : %d / 255\n", config.screenBrightness);
     Serial.println("--------------------------------------------");
   }
