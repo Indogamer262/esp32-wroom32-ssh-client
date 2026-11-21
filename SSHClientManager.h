@@ -17,9 +17,10 @@
 #include <libssh/callbacks.h>
 #define HAS_LIBSSH 1
 
-// Stack size yang aman untuk operasi kriptografi LibSSH pada ESP32 (20 KB / 16 KB)
-#define SSH_TASK_STACK_SIZE 20480
-#define SSH_TASK_STACK_FALLBACK 16384
+// Stack size yang seimbang (15 KB / 13 KB fallback)
+// Memberi ruang stack cukup (>3 KB di atas canary) sekaligus menyisakan blok heap kontigu >6 KB untuk buffer KEX
+#define SSH_TASK_STACK_SIZE 15360
+#define SSH_TASK_STACK_FALLBACK 13312
 
 class SSHClientManager {
 private:
@@ -50,7 +51,7 @@ public:
   void begin() {
     libssh_begin();
     ssh_set_log_callback(libsshLoggingCallback);
-    ssh_set_log_level(SSH_LOG_PROTOCOL);
+    ssh_set_log_level(SSH_LOG_WARNING);
     if (txQueue == nullptr) {
       txQueue = xQueueCreate(256, sizeof(char));
     }
@@ -124,7 +125,7 @@ public:
     uint32_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     Serial.printf("[SSH] Status Memori -> Free Heap: %u bytes, Blok Kontigu Terbesar: %u bytes\n", freeHeap, largestBlock);
 
-    // Buat Dedicated FreeRTOS Task (Coba 10 KB, jika fragmentasi tinggi fallback ke 8 KB)
+    // Buat Dedicated FreeRTOS Task (15 KB, jika fragmentasi tinggi fallback ke 13 KB)
     BaseType_t ret = xTaskCreatePinnedToCore(
       sshTaskStatic,
       "SSH_Worker",
@@ -136,7 +137,7 @@ public:
     );
 
     if (ret != pdPASS) {
-      Serial.println("[SSH] Mencoba alokasi alternatif dengan stack 8 KB...");
+      Serial.println("[SSH] Mencoba alokasi alternatif dengan stack fallback 13 KB...");
       ret = xTaskCreatePinnedToCore(
         sshTaskStatic,
         "SSH_Worker",
@@ -198,6 +199,8 @@ private:
     String pass = Storage.config.sshPass;
 
     Serial.printf("\n[SSH] Target: %s@%s:%u\n", user.c_str(), host.c_str(), port);
+    Serial.printf("[SSH-TASK] Status Memori Worker -> Free Heap: %u bytes, Blok Kontigu: %u bytes\n",
+                  ESP.getFreeHeap(), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     UI.printTerminalString("Target: ", COLOR_MUTED);
     UI.printTerminalString(user + "@" + host + ":" + String(port) + "\n", COLOR_TEXT);
 
@@ -214,17 +217,17 @@ private:
     if (user.length() == 0) user = "pi";
 
     long timeout = 8;
-    int verbosity = SSH_LOG_PROTOCOL;
+    int verbosity = SSH_LOG_WARNING; // Gunakan SSH_LOG_WARNING untuk menghemat alokasi stack logger
 
     int r;
     r = ssh_options_set(session, SSH_OPTIONS_HOST, host.c_str());
     Serial.printf("[SSH-OPT] Set HOST '%s' -> %s (%d)\n", host.c_str(), r == 0 ? "OK" : "FAIL", r);
 
-    r = ssh_options_set(session, SSH_OPTIONS_PORT, &port);
-    Serial.printf("[SSH-OPT] Set PORT %u -> %s (%d)\n", port, r == 0 ? "OK" : "FAIL", r);
-
     r = ssh_options_set(session, SSH_OPTIONS_USER, user.c_str());
     Serial.printf("[SSH-OPT] Set USER '%s' -> %s (%d)\n", user.c_str(), r == 0 ? "OK" : "FAIL", r);
+
+    r = ssh_options_set(session, SSH_OPTIONS_PORT, &port);
+    Serial.printf("[SSH-OPT] Set PORT %u -> %s (%d)\n", port, r == 0 ? "OK" : "FAIL", r);
 
     r = ssh_options_set(session, SSH_OPTIONS_TIMEOUT, &timeout);
     Serial.printf("[SSH-OPT] Set TIMEOUT %ld -> %s (%d)\n", timeout, r == 0 ? "OK" : "FAIL", r);
@@ -232,10 +235,16 @@ private:
     r = ssh_options_set(session, SSH_OPTIONS_LOG_VERBOSITY, &verbosity);
     Serial.printf("[SSH-OPT] Set LOG_VERBOSITY -> %s (%d)\n", r == 0 ? "OK" : "FAIL", r);
 
-    // KUNCI: Tandai parsing konfigurasi telah selesai menggunakan file dummy SPIFFS kosong
-    // Ini secara otomatis mematikan pencarian file Unix /etc/ssh/ssh_config tanpa merusak opsi session!
-    r = ssh_options_parse_config(session, "/spiffs/known_hosts");
-    Serial.printf("[SSH-OPT] Parse Config Dummy (/spiffs/known_hosts) -> %s (%d)\n", r == 0 ? "OK" : "FAIL", r);
+    // 1. Matikan pemrosesan otomatis file konfigurasi sistem (/etc/ssh/ssh_config dan ~/.ssh/config)
+    // CATATAN: SSH_OPTIONS_PROCESS_CONFIG adalah enum, jangan dibungkus #ifdef!
+    bool process_config = false;
+    r = ssh_options_set(session, SSH_OPTIONS_PROCESS_CONFIG, &process_config);
+    Serial.printf("[SSH-OPT] Set PROCESS_CONFIG (false) -> %s (%d)\n", r == 0 ? "OK" : "FAIL", r);
+
+    // 2. Matikan pengecekan host key ketat (menghindari pencarian ~/.ssh/known_hosts yang tidak ada)
+    int strict_hostkey = 0;
+    r = ssh_options_set(session, SSH_OPTIONS_STRICTHOSTKEYCHECK, &strict_hostkey);
+    Serial.printf("[SSH-OPT] Set STRICTHOSTKEYCHECK (0) -> %s (%d)\n", r == 0 ? "OK" : "FAIL", r);
 
     // 3. Buka Koneksi SSH Handshake Langsung (KEX & Cipher Negotiation)
     Serial.println("[SSH] Menjalankan ssh_connect (Key Exchange & Cipher Negotiation)...");
@@ -256,7 +265,7 @@ private:
       return;
     }
 
-    Serial.println("[SSH] Handshake KEX Berhasil! Melakukan Autentikasi...");
+    Serial.printf("[SSH] Handshake KEX Berhasil! Sisa Stack: %u bytes. Melakukan Autentikasi...\n", (unsigned int)uxTaskGetStackHighWaterMark(NULL));
     UI.printTerminalString("Autentikasi...\n", COLOR_MUTED);
 
     // 4. Autentikasi User

@@ -31,7 +31,6 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <SPIFFS.h>
 #include <libssh_esp32.h>
 #include <libssh/libssh.h>
 #include "Config.h"
@@ -66,25 +65,6 @@ void setup() {
   Serial.println("[INIT] Menginisialisasi Flash Storage (Preferences/NVS)...");
   Storage.begin();
   Storage.printCurrentConfig();
-
-  // 1b. Inisialisasi File System SPIFFS (Otomatis memformat jika partisi baru)
-  Serial.println("[INIT] Menginisialisasi File System SPIFFS...");
-  if (!SPIFFS.begin(true)) {
-    Serial.println("[SPIFFS] GAGAL me-mount atau memformat partisi SPIFFS!");
-  } else {
-    Serial.printf("[SPIFFS] Berhasil Aktif! Total: %u KB, Terpakai: %u KB\n",
-                  (unsigned int)(SPIFFS.totalBytes() / 1024), 
-                  (unsigned int)(SPIFFS.usedBytes() / 1024));
-
-    // Pastikan file known_hosts ada agar LibSSH dapat membaca/menulisnya tanpa error
-    if (!SPIFFS.exists("/known_hosts")) {
-      File f = SPIFFS.open("/known_hosts", FILE_WRITE);
-      if (f) {
-        f.close();
-        Serial.println("[SPIFFS] File /known_hosts berhasil dibuat.");
-      }
-    }
-  }
 
   // 2. Inisialisasi Layar LCD ST7789 IPS 240x240
   Serial.println("[INIT] Menginisialisasi Layar ST7789 240x240 IPS...");
