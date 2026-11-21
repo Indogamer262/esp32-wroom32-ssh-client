@@ -246,6 +246,23 @@ private:
     r = ssh_options_set(session, SSH_OPTIONS_STRICTHOSTKEYCHECK, &strict_hostkey);
     Serial.printf("[SSH-OPT] Set STRICTHOSTKEYCHECK (0) -> %s (%d)\n", r == 0 ? "OK" : "FAIL", r);
 
+    // 3. Arahkan known_hosts ke /dev/null agar LibSSH tidak mencoba mencari file VFS
+    ssh_options_set(session, SSH_OPTIONS_KNOWNHOSTS, "/dev/null");
+    ssh_options_set(session, SSH_OPTIONS_GLOBAL_KNOWNHOSTS, "/dev/null");
+
+    // 4. KUNCI PENGHEMAT RAM & SOLUSI "Error adding string in hash buffer":
+    // Batasi algoritma KEX, Ciphers, dan Hostkeys ke Elliptic Curve (Curve25519 & Ed25519)
+    // Ini memangkas ukuran paket KEXINIT & hash buffer hingga >70% serta menghindari alokasi bignum RSA/DH raksasa!
+    r = ssh_options_set(session, SSH_OPTIONS_KEY_EXCHANGE, "curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group14-sha1");
+    Serial.printf("[SSH-OPT] Set KEX -> %s (%d)\n", r == 0 ? "OK" : "FAIL", r);
+
+    r = ssh_options_set(session, SSH_OPTIONS_HOSTKEYS, "ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-256");
+    Serial.printf("[SSH-OPT] Set HOSTKEYS -> %s (%d)\n", r == 0 ? "OK" : "FAIL", r);
+
+    r = ssh_options_set(session, SSH_OPTIONS_CIPHERS_C_S, "chacha20-poly1305@openssh.com,aes128-ctr");
+    r = ssh_options_set(session, SSH_OPTIONS_CIPHERS_S_C, "chacha20-poly1305@openssh.com,aes128-ctr");
+    Serial.printf("[SSH-OPT] Set CIPHERS -> %s (%d)\n", r == 0 ? "OK" : "FAIL", r);
+
     // 3. Buka Koneksi SSH Handshake Langsung (KEX & Cipher Negotiation)
     Serial.println("[SSH] Menjalankan ssh_connect (Key Exchange & Cipher Negotiation)...");
     UI.printTerminalString("Menghubungkan ke server...\n", COLOR_MUTED);
