@@ -102,12 +102,9 @@ void loop() {
 
   // 2. Jika sedang berada dalam Sesi Terminal SSH
   if (UI.getState() == STATE_SSH_TERMINAL) {
-    if (!SSHClient.getIsConnected()) {
+    if (!SSHClient.getIsConnected() && !SSHClient.getIsConnecting()) {
       // Buka sesi SSH jika belum terkoneksi
       SSHClient.startSession();
-    } else {
-      // Loop non-blocking reader untuk SSH stream
-      SSHClient.loop();
     }
   }
 
@@ -123,9 +120,8 @@ void onKeyEvent(const KeyEvent& ev) {
   // -------------------------------------------------------------
   if (ev.special == KEY_EXIT_SSH) {
     if (UI.getState() == STATE_SSH_TERMINAL) {
-      Serial.println("\n[SISTEM] Right-CTRL + C diterima! Menutup sesi SSH dan kembali ke Menu...");
+      Serial.println("\n[SISTEM] Right-CTRL + C diterima! Menutup sesi SSH...");
       SSHClient.closeSession();
-      UI.setState(STATE_MAIN_MENU);
     }
     return;
   }

@@ -3,6 +3,9 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 #include "Config.h"
 #include "StorageManager.h"
 #include "DisplayUI.h"
@@ -12,29 +15,36 @@
 #include <libssh/libssh.h>
 #define HAS_LIBSSH 1
 
+// Stack size yang optimal untuk operasi kriptografi LibSSH pada ESP32 (12 KB / 10 KB)
+#define SSH_TASK_STACK_SIZE 10240
+#define SSH_TASK_STACK_FALLBACK 8192
+
 class SSHClientManager {
 private:
-  bool isConnected = false;
-  bool isConnecting = false;
+  volatile bool isConnected = false;
+  volatile bool isConnecting = false;
+  volatile bool shouldStop = false;
+  TaskHandle_t sshTaskHandle = nullptr;
+  QueueHandle_t txQueue = nullptr;
 
-#if HAS_LIBSSH
   ssh_session session = nullptr;
   ssh_channel channel = nullptr;
-#endif
 
 public:
   bool getIsConnected() const {
     return isConnected;
   }
 
+  bool getIsConnecting() const {
+    return isConnecting;
+  }
+
   void begin() {
-#if HAS_LIBSSH
     libssh_begin();
-    Serial.println("[SSH] LibSSH-ESP32 siap digunakan.");
-#else
-    Serial.println("[SSH] CATATAN: Header 'libssh_esp32.h' belum terpasang di Arduino IDE.");
-    Serial.println("[SSH] Silakan instal library 'LibSSH-ESP32' via Library Manager Arduino IDE.");
-#endif
+    if (txQueue == nullptr) {
+      txQueue = xQueueCreate(256, sizeof(char));
+    }
+    Serial.println("[SSH] LibSSH-ESP32 Engine siap digunakan.");
   }
 
   bool ensureWiFi() {
@@ -75,6 +85,8 @@ public:
   }
 
   bool startSession() {
+    if (isConnecting || isConnected) return false;
+
     UI.clearTerminal();
     UI.drawTerminalFooter();
     UI.printTerminalString("=== MEMBUKA SESI SSH ===\n", COLOR_SELECTED);
@@ -84,97 +96,206 @@ public:
       return false;
     }
 
-    UI.printTerminalString("Target: ", COLOR_MUTED);
-    UI.printTerminalString(Storage.config.sshUser + "@" + Storage.config.sshHost + ":" + String(Storage.config.sshPort) + "\n", COLOR_TEXT);
+    isConnecting = true;
+    shouldStop = false;
 
-#if HAS_LIBSSH
-    if (session != nullptr) {
-      closeSession();
+    // Tunggu task lama selesai dengan anggun jika masih berjalan
+    if (sshTaskHandle != nullptr) {
+      shouldStop = true;
+      int waitLimit = 0;
+      while (sshTaskHandle != nullptr && waitLimit < 10) {
+        delay(100);
+        waitLimit++;
+      }
     }
 
+    // Cek status memori kontigu
+    uint32_t freeHeap = ESP.getFreeHeap();
+    uint32_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    Serial.printf("[SSH] Status Memori -> Free Heap: %u bytes, Blok Kontigu Terbesar: %u bytes\n", freeHeap, largestBlock);
+
+    // Buat Dedicated FreeRTOS Task (Coba 10 KB, jika fragmentasi tinggi fallback ke 8 KB)
+    BaseType_t ret = xTaskCreatePinnedToCore(
+      sshTaskStatic,
+      "SSH_Worker",
+      SSH_TASK_STACK_SIZE,
+      this,
+      2,
+      &sshTaskHandle,
+      1 // Jalankan pada Core 1 bersama UI
+    );
+
+    if (ret != pdPASS) {
+      Serial.println("[SSH] Mencoba alokasi alternatif dengan stack 8 KB...");
+      ret = xTaskCreatePinnedToCore(
+        sshTaskStatic,
+        "SSH_Worker",
+        SSH_TASK_STACK_FALLBACK,
+        this,
+        2,
+        &sshTaskHandle,
+        1
+      );
+    }
+
+    if (ret != pdPASS) {
+      Serial.printf("[SSH] GAGAL: Memori kontigu tidak mencukupi (%u bytes tersisa)!\n", largestBlock);
+      UI.printTerminalString("[ERROR] Gagal alokasi SSH Task!\nMemory Kurang.\n", COLOR_DANGER);
+      isConnecting = false;
+      delay(2000);
+      UI.setState(STATE_MAIN_MENU);
+      return false;
+    }
+
+    return true;
+  }
+
+  void loop() {
+    // Sesi SSH kini dijalankan secara asinkron di dalam FreeRTOS Task (sshWorkerLoop)
+  }
+
+  void sendInput(const char* data, size_t len) {
+    if (!isConnected || txQueue == nullptr || shouldStop) return;
+    for (size_t i = 0; i < len; i++) {
+      xQueueSend(txQueue, &data[i], 0);
+    }
+  }
+
+  // Graceful shutdown yang AMAN dipanggil dari task mana pun (termasuk Bluetooth callback)
+  void closeSession() {
+    Serial.println("[SSH] Meminta penutupan sesi SSH secara aman...");
+    shouldStop = true;
+    isConnected = false;
+    isConnecting = false;
+    // Panggil ssh_disconnect pada session untuk membatalkan socket blocking di worker task
+    if (session != nullptr) {
+      ssh_disconnect(session);
+    }
+  }
+
+private:
+  static void sshTaskStatic(void* param) {
+    SSHClientManager* self = (SSHClientManager*)param;
+    self->runSSHWorker();
+    self->sshTaskHandle = nullptr;
+    vTaskDelete(NULL); // Task menghapus dirinya sendiri secara aman
+  }
+
+  void runSSHWorker() {
+    String host = Storage.config.sshHost;
+    unsigned int port = Storage.config.sshPort;
+    String user = Storage.config.sshUser;
+    String pass = Storage.config.sshPass;
+
+    Serial.printf("\n[SSH] Target: %s@%s:%u\n", user.c_str(), host.c_str(), port);
+    UI.printTerminalString("Target: ", COLOR_MUTED);
+    UI.printTerminalString(user + "@" + host + ":" + String(port) + "\n", COLOR_TEXT);
+
+    // 1. Alokasi Sesi LibSSH
     session = ssh_new();
     if (session == nullptr) {
+      Serial.println("[SSH] Gagal alokasi ssh_session!");
       UI.printTerminalString("[ERROR] Gagal alokasi ssh_session!\n", COLOR_DANGER);
-      return false;
+      cleanupWorker();
+      return;
     }
 
-    int port = Storage.config.sshPort;
-    long timeout = 10;
-    ssh_options_set(session, SSH_OPTIONS_HOST, Storage.config.sshHost.c_str());
+    // 2. Konfigurasi Parameter LibSSH
+    // Matikan pembacaan file konfigurasi Unix (/etc/ssh/ssh_config) yang tidak ada di ESP32
+#ifdef SSH_OPTIONS_PROCESS_CONFIG
+    int process_config = 0;
+    ssh_options_set(session, SSH_OPTIONS_PROCESS_CONFIG, &process_config);
+#endif
+
+    long timeout = 8;
+    int verbosity = SSH_LOG_PROTOCOL; // Aktifkan log protokol lengkap di Serial Monitor
+
+    ssh_options_set(session, SSH_OPTIONS_HOST, host.c_str());
     ssh_options_set(session, SSH_OPTIONS_PORT, &port);
-    ssh_options_set(session, SSH_OPTIONS_USER, Storage.config.sshUser.c_str());
+    ssh_options_set(session, SSH_OPTIONS_USER, user.c_str());
     ssh_options_set(session, SSH_OPTIONS_TIMEOUT, &timeout);
+    ssh_options_set(session, SSH_OPTIONS_LOG_VERBOSITY, &verbosity);
 
+    // 3. Buka Koneksi SSH Handshake Langsung (KEX & Cipher Negotiation)
+    Serial.println("[SSH] Menjalankan ssh_connect (Key Exchange & Cipher Negotiation)...");
     UI.printTerminalString("Menghubungkan ke server...\n", COLOR_MUTED);
+
     int rc = ssh_connect(session);
-    if (rc != SSH_OK) {
-      UI.printTerminalString("[ERROR] Gagal konek: ", COLOR_DANGER);
-      UI.printTerminalString(String(ssh_get_error(session)) + "\n", COLOR_DANGER);
-      ssh_free(session);
-      session = nullptr;
-      return false;
+    if (shouldStop) {
+      cleanupWorker();
+      return;
     }
 
+    if (rc != SSH_OK) {
+      const char* errStr = ssh_get_error(session);
+      Serial.printf("[SSH] Gagal ssh_connect: %s (Kode: %d)\n", errStr, rc);
+      UI.printTerminalString("[ERROR] Gagal konek: ", COLOR_DANGER);
+      UI.printTerminalString(String(errStr) + "\n", COLOR_DANGER);
+      cleanupWorker();
+      return;
+    }
+
+    Serial.println("[SSH] Handshake KEX Berhasil! Melakukan Autentikasi...");
     UI.printTerminalString("Autentikasi...\n", COLOR_MUTED);
-    if (Storage.config.sshPass.length() > 0) {
-      rc = ssh_userauth_password(session, NULL, Storage.config.sshPass.c_str());
+
+    // 4. Autentikasi User
+    if (pass.length() > 0) {
+      rc = ssh_userauth_password(session, NULL, pass.c_str());
     } else {
       rc = ssh_userauth_none(session, NULL);
     }
 
-    if (rc != SSH_AUTH_SUCCESS) {
-      UI.printTerminalString("[ERROR] Autentikasi gagal! Cek user/password.\n", COLOR_DANGER);
-      closeSession();
-      return false;
+    if (shouldStop) {
+      cleanupWorker();
+      return;
     }
 
+    if (rc != SSH_AUTH_SUCCESS) {
+      Serial.printf("[SSH] Autentikasi Gagal! Kode: %d (Periksa Username & Password)\n", rc);
+      UI.printTerminalString("[ERROR] Autentikasi gagal! Cek user/password.\n", COLOR_DANGER);
+      cleanupWorker();
+      return;
+    }
+
+    Serial.println("[SSH] Autentikasi Berhasil!");
     UI.printTerminalString("[OK] Autentikasi Berhasil!\n", COLOR_SUCCESS);
 
-    // Buka Channel & Interactive Shell (PTY)
+    // 5. Buka Channel & Interactive Shell (PTY VT100)
     channel = ssh_channel_new(session);
     if (channel == nullptr || ssh_channel_open_session(channel) != SSH_OK) {
+      Serial.println("[SSH] Gagal membuka channel SSH!");
       UI.printTerminalString("[ERROR] Gagal membuka channel SSH!\n", COLOR_DANGER);
-      closeSession();
-      return false;
+      cleanupWorker();
+      return;
     }
 
-    // Request PTY terminal ukuran 40 cols x 28 rows
+    // Request terminal PTY ukuran 40 cols x 28 rows
     rc = ssh_channel_request_pty_size(channel, "vt100", TERM_COLS, TERM_ROWS);
     if (rc != SSH_OK) {
-      UI.printTerminalString("[WARN] Request PTY ditolak, mencoba default...\n", COLOR_MUTED);
+      Serial.println("[SSH] Peringatan: Request PTY size ditolak, mencoba request shell...");
     }
 
     rc = ssh_channel_request_shell(channel);
     if (rc != SSH_OK) {
+      Serial.println("[SSH] Gagal membuka remote shell!");
       UI.printTerminalString("[ERROR] Gagal membuka shell interaktif!\n", COLOR_DANGER);
-      closeSession();
-      return false;
+      cleanupWorker();
+      return;
     }
 
     isConnected = true;
+    isConnecting = false;
     UI.printTerminalString("--- TERMINAL READY ---\n", COLOR_ACCENT);
-    Serial.println("[SSH] Sesi interaktif berhasil dimulai!");
-    return true;
+    Serial.println("\n[SSH] >> SESI TERMINAL INTERAKTIF SIAP DIGUNAKAN <<");
 
-#else
-    // Fallback Mock Terminal untuk keperluan uji coba jika LibSSH belum diinstal
-    UI.printTerminalString("\n[CATATAN] Library LibSSH-ESP32 belum ada.\n", COLOR_SELECTED);
-    UI.printTerminalString("Silakan pasang 'LibSSH-ESP32' di Arduino IDE.\n", COLOR_MUTED);
-    UI.printTerminalString("Mode Simulasi Terminal Aktif.\n", COLOR_ACCENT);
-    UI.printTerminalString("Ketik perintah apa saja via BT Keyboard.\n", COLOR_TEXT);
-    UI.printTerminalString("Tekan Right-CTRL+C untuk kembali ke Menu.\n\n", COLOR_SELECTED);
-    UI.printTerminalString("esp32@terminal:~$ ", COLOR_SUCCESS);
-    isConnected = true;
-    return true;
-#endif
-  }
+    // Kosongkan buffer txQueue sebelum mulai
+    char dummy;
+    while (xQueueReceive(txQueue, &dummy, 0) == pdTRUE);
 
-  void loop() {
-    if (!isConnected) return;
-
-#if HAS_LIBSSH
-    if (channel != nullptr && ssh_channel_is_open(channel)) {
-      char buf[256];
+    // 6. Loop Interaktif Non-blocking di dalam Task
+    char buf[128];
+    while (!shouldStop && isConnected && channel != nullptr && ssh_channel_is_open(channel)) {
+      // Baca output dari SSH Server
       int nbytes = ssh_channel_read_nonblocking(channel, buf, sizeof(buf) - 1, 0);
       if (nbytes > 0) {
         buf[nbytes] = '\0';
@@ -183,38 +304,25 @@ public:
           Serial.write(buf[i]);
         }
       } else if (nbytes < 0 && ssh_channel_is_eof(channel)) {
+        Serial.println("\n[SSH] Server menutup koneksi (EOF).");
         UI.printTerminalString("\n[SSH] Server menutup koneksi.\n", COLOR_DANGER);
-        closeSession();
+        break;
       }
+
+      // Kirim input keystroke dari Keyboard / Serial ke SSH Server
+      char keyChar;
+      while (xQueueReceive(txQueue, &keyChar, 0) == pdTRUE) {
+        ssh_channel_write(channel, &keyChar, 1);
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(15));
     }
-#endif
+
+    cleanupWorker();
   }
 
-  void sendInput(const char* data, size_t len) {
-    if (!isConnected) return;
-
-#if HAS_LIBSSH
-    if (channel != nullptr && ssh_channel_is_open(channel)) {
-      ssh_channel_write(channel, data, len);
-    }
-#else
-    // Echo di mode simulasi
-    for (size_t i = 0; i < len; i++) {
-      UI.printTerminalChar(data[i], COLOR_ACCENT);
-      if (data[i] == '\r') {
-        UI.printTerminalChar('\n', COLOR_ACCENT);
-        UI.printTerminalString("esp32@terminal:~$ ", COLOR_SUCCESS);
-      }
-    }
-#endif
-  }
-
-  void closeSession() {
-    if (!isConnected) return;
-    Serial.println("[SSH] Menutup sesi SSH...");
-    UI.printTerminalString("\n[SSH] Sesi ditutup.\n", COLOR_MUTED);
-
-#if HAS_LIBSSH
+  // Cleanup aman yang berjalan di dalam thread worker sendiri
+  void cleanupWorker() {
     if (channel != nullptr) {
       ssh_channel_send_eof(channel);
       ssh_channel_close(channel);
@@ -226,10 +334,13 @@ public:
       ssh_free(session);
       session = nullptr;
     }
-#endif
 
     isConnected = false;
-    delay(1000);
+    isConnecting = false;
+    shouldStop = false;
+    Serial.println("[SSH] Sesi SSH ditutup dengan bersih.");
+    UI.printTerminalString("\n[SSH] Sesi ditutup.\n", COLOR_MUTED);
+    vTaskDelay(pdMS_TO_TICKS(1500));
     UI.setState(STATE_MAIN_MENU);
   }
 };
