@@ -170,10 +170,10 @@ public:
     esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &ble_iocap, sizeof(uint8_t));
 
     // 6. Inisialisasi Unified HID Host (BLE)
-    // Gunakan 2048 bytes (menghemat 2 KB RAM heap penting untuk LibSSH)
+    // Gunakan 4096 bytes agar tidak terjadi stackoverflow
     esp_hidh_config_t hidh_cfg = {
       .callback = hidhCallbackStatic,
-      .event_stack_size = 2048,
+      .event_stack_size = 4096,
       .callback_arg = NULL
     };
     esp_err_t ret = esp_hidh_init(&hidh_cfg);
